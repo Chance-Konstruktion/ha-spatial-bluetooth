@@ -99,6 +99,33 @@ def _norm(address: Any) -> str:
     return str(address or "").strip().lower().replace("-", ":")
 
 
+def _registry_entries(registry: Any) -> list[Any]:
+    """Every device entry, without the deprecated mapping view.
+
+    ``registry.devices`` used to be a plain mapping, so the way to get the
+    entries was ``.values()``. Core deprecated that in 2025.9 -- reading it
+    as a mapping now logs a warning on every call and stops working in
+    2027.9. The replacement is to iterate the object itself, which yields
+    the entries directly.
+
+    Both spellings live here because this integration still declares
+    2024.4 as its floor, and on those versions iterating yields the keys
+    instead. A key is a string, and that is the one thing an entry never
+    is -- so the old shape is recognised without asking Core for its
+    version. On a current install the subscript below is never reached,
+    which is the point: no warning.
+    """
+    devices = getattr(registry, "devices", None)
+    if not devices:
+        return []
+    entries: list[Any] = []
+    for entry in devices:
+        if isinstance(entry, str):  # pre-2025.9: iteration yields keys
+            entry = devices[entry]
+        entries.append(entry)
+    return entries
+
+
 def _devices_by_address(hass: HomeAssistant) -> dict[str, Any]:
     """Every device registry entry, keyed by the MAC it is reachable at.
 
@@ -114,7 +141,7 @@ def _devices_by_address(hass: HomeAssistant) -> dict[str, Any]:
         return {}
 
     found: dict[str, Any] = {}
-    for device in getattr(registry, "devices", {}).values():
+    for device in _registry_entries(registry):
         for connection in getattr(device, "connections", None) or ():
             # Same defensiveness as everywhere else: `connections` is typed
             # as pairs but nothing enforces the length, and unpacking into
