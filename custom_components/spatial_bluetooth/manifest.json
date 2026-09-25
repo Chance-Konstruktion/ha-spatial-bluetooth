@@ -1,6 +1,6 @@
 {
   "domain": "spatial_bluetooth",
-  "name": "Spatial Hub: Bluetooth",
+  "name": "spatial-hub: bluetooth",
   "after_dependencies": [
     "bluetooth"
   ],
