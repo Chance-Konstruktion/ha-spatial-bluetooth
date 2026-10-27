@@ -162,3 +162,35 @@ def test_der_anhaenger_wird_am_lauteren_proxy_verankert(funkhaus) -> None:
         f"-55 dBm muss deutlich staerker ziehen als -88 dBm, "
         f"ist aber {kueche:.3f} gegen {keller:.3f}"
     )
+
+def test_device_and_entity_registries_are_indexed_once_per_refresh(
+    funkhaus, monkeypatch
+) -> None:
+    """Avoid rescanning both registries for every scanner and advertisement."""
+    from homeassistant.helpers import device_registry as dr, entity_registry as er
+
+    registration = _anmeldung(funkhaus)
+    original_devices_get = dr.async_get
+    original_entities_get = er.async_get
+    device_calls = 0
+    entity_calls = 0
+
+    def counted_devices_get(hass):
+        nonlocal device_calls
+        device_calls += 1
+        return original_devices_get(hass)
+
+    def counted_entities_get(hass):
+        nonlocal entity_calls
+        entity_calls += 1
+        return original_entities_get(hass)
+
+    monkeypatch.setattr(dr, "async_get", counted_devices_get)
+    monkeypatch.setattr(er, "async_get", counted_entities_get)
+
+    payload = registration["data"]()
+
+    assert len(payload["nodes"]) == 3
+    assert device_calls == 1
+    assert entity_calls == 1
+
