@@ -154,7 +154,25 @@ def _devices_by_address(hass: HomeAssistant) -> dict[str, Any]:
     return found
 
 
-def _representative(hass: HomeAssistant, device: Any) -> str | None:
+def _entities_by_device(hass: HomeAssistant) -> dict[str, list[Any]]:
+    """Index enabled entity entries once for the current refresh."""
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, KeyError):  # pragma: no cover
+        return {}
+    by_device: dict[str, list[Any]] = {}
+    for entry in getattr(registry, "entities", {}).values():
+        device_id = getattr(entry, "device_id", None)
+        if device_id and not getattr(entry, "disabled_by", None):
+            by_device.setdefault(device_id, []).append(entry)
+    return by_device
+
+
+def _representative(
+    hass: HomeAssistant,
+    device: Any,
+    entities_by_device: dict[str, list[Any]] | None = None,
+) -> str | None:
     """One entity to stand for a device, so its popup has a door.
 
     Without an entity_id the hub's popup is a card with a name on it and
@@ -163,16 +181,9 @@ def _representative(hass: HomeAssistant, device: Any) -> str | None:
     """
     if device is None:
         return None
-    try:
-        registry = er.async_get(hass)
-    except (AttributeError, KeyError):  # pragma: no cover
-        return None
-    entries = [
-        entry
-        for entry in getattr(registry, "entities", {}).values()
-        if getattr(entry, "device_id", None) == device.id
-        and not getattr(entry, "disabled_by", None)
-    ]
+    if entities_by_device is None:
+        entities_by_device = _entities_by_device(hass)
+    entries = entities_by_device.get(device.id, [])
     if not entries:
         return None
     return sorted(
@@ -183,23 +194,38 @@ def _representative(hass: HomeAssistant, device: Any) -> str | None:
         ),
     )[0].entity_id
 
+def _current_scanners(hass: HomeAssistant, bluetooth: Any) -> list[Any]:
+    """Read the current receivers once, treating an unavailable API as empty."""
+    try:
+        return list(bluetooth.async_current_scanners(hass) or [])
+    except (AttributeError, KeyError, RuntimeError):
+        # Older Home Assistant, or Bluetooth set up but not started.
+        _LOGGER.debug("no Bluetooth scanners to ask about", exc_info=True)
+        return []
 
-def _scanners(hass: HomeAssistant, bluetooth: Any) -> dict[str, dict[str, Any]]:
+
+def _scanners(
+    hass: HomeAssistant,
+    bluetooth: Any,
+    *,
+    current: list[Any] | None = None,
+    by_address: dict[str, Any] | None = None,
+    entities_by_device: dict[str, list[Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Every receiver currently registered, keyed by its source.
 
-    The source is the string every advertisement is tagged with, so it is
-    what the edges have to point at. A remote scanner's source is its MAC,
-    which is how a proxy finds its own device entry -- and with it the room
-    the user already put it in.
+    The registry indexes may be supplied by the caller so the device and
+    entity registries are traversed only once during a complete refresh.
     """
-    try:
-        current = bluetooth.async_current_scanners(hass)
-    except (AttributeError, KeyError, RuntimeError):
-        # Older Home Assistant, or bluetooth set up but not started.
-        _LOGGER.debug("no Bluetooth scanners to ask about", exc_info=True)
+    if current is None:
+        current = _current_scanners(hass, bluetooth)
+    if not current:
         return {}
+    if by_address is None:
+        by_address = _devices_by_address(hass)
+    if entities_by_device is None:
+        entities_by_device = _entities_by_device(hass)
 
-    by_address = _devices_by_address(hass)
     scanners: dict[str, dict[str, Any]] = {}
     for scanner in current:
         source = str(getattr(scanner, "source", "") or "")
@@ -218,7 +244,7 @@ def _scanners(hass: HomeAssistant, bluetooth: Any) -> dict[str, dict[str, Any]]:
                     getattr(scanner, "name", "") or getattr(device, "name", "") or source
                 ),
                 area_id=getattr(device, "area_id", None),
-                entity_id=_representative(hass, device),
+                entity_id=_representative(hass, device, entities_by_device),
                 state="online" if scanning else "offline",
                 icon="mdi:bluetooth-audio" if scanning else "mdi:bluetooth-off",
                 rolle="Empfänger",
@@ -232,7 +258,6 @@ def _scanners(hass: HomeAssistant, bluetooth: Any) -> dict[str, dict[str, Any]]:
             ),
         }
     return scanners
-
 
 def _heard_by(bluetooth: Any, hass: HomeAssistant, address: str) -> list[tuple[str, Any]]:
     """Which receivers hear this address right now, and at what RSSI.
@@ -366,11 +391,21 @@ def async_setup_spatial(hass: HomeAssistant, entry: Any) -> None:
         if bluetooth is None:
             return {"nodes": [], "edges": []}
 
-        scanners = _scanners(hass, bluetooth)
-        if not scanners:
+        current_scanners = _current_scanners(hass, bluetooth)
+        if not current_scanners:
             return {"nodes": [], "edges": []}
 
         by_address = _devices_by_address(hass)
+        entities_by_device = _entities_by_device(hass)
+        scanners = _scanners(
+            hass,
+            bluetooth,
+            current=current_scanners,
+            by_address=by_address,
+            entities_by_device=entities_by_device,
+        )
+        if not scanners:
+            return {"nodes": [], "edges": []}
         # A receiver is drawn as a receiver, never a second time as one of
         # the things being heard -- proxies advertise too.
         own = {_norm(source) for source in scanners}
@@ -443,7 +478,7 @@ def async_setup_spatial(hass: HomeAssistant, entry: Any) -> None:
                     or str(getattr(info, "name", "") or address),
                     area_id=area_id,
                     anchors=anchors,
-                    entity_id=_representative(hass, device),
+                    entity_id=_representative(hass, device, entities_by_device),
                     state="online",
                     icon="mdi:bluetooth",
                     rolle="Gerät",
